@@ -1,0 +1,79 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Meta Platforms, Inc.  All Rights Reserved.
+#
+# Make sure "btrfs filesystem defragment --nocomp" rewrites compressed extents
+# as uncompressed ones, even though the filesystem is mounted with compression
+# enabled, and without changing the file contents.
+#
+# Note that regular defrag deliberately skips compressed extents that are
+# already at their maximum size (see btrfs/259), so a broken --nocomp that
+# simply does nothing would go unnoticed without this test.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress
+
+. ./common/filter
+
+_require_scratch
+_require_btrfs_command inspect-internal dump-tree
+_require_btrfs_command filesystem defragment --nocomp
+_wants_kernel_commit 009b2056cb25 \
+	"btrfs: defrag: add flag to force no-compression"
+
+# Same helper as btrfs/260: btrfs specific extent attributes are only
+# available from dump-tree, not from fiemap.
+check_file_extent()
+{
+	local file="$1"
+	local offset="$2"
+	local expected="$3"
+	local ino=$(stat -c "%i" "$file")
+
+	echo "=== file extent at file '$file' offset $offset ===" >> $seqres.full
+	$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 $SCRATCH_DEV |\
+		grep -A4 "($ino EXTENT_DATA $offset)" > $tmp.output
+	cat $tmp.output >> $seqres.full
+	grep -q "$expected" $tmp.output ||\
+		echo "file \"$file\" offset $offset doesn't have expected string \"$expected\""
+}
+
+_scratch_mkfs >> $seqres.full 2>&1
+_scratch_mount -o compress=zlib
+
+# Default xfs_io pattern is highly compressible, so every extent of this file
+# ends up compressed and at the 128K maximum compressed extent size.
+$XFS_IO_PROG -f -c "pwrite 0 1m" "$SCRATCH_MNT/foo" >> $seqres.full
+sync
+
+# Should be zlib compressed
+check_file_extent "$SCRATCH_MNT/foo" 0 "compression 1"
+
+csum_before=$(_md5_checksum "$SCRATCH_MNT/foo")
+
+$BTRFS_UTIL_PROG filesystem defragment --nocomp "$SCRATCH_MNT/foo" \
+	> $tmp.defrag 2>&1
+cat $tmp.defrag >> $seqres.full
+
+# Kernels between v6.8 and v6.16 reject the unknown flag outright. Older
+# kernels ignore it silently, and there the compression check below fails.
+grep -q "Operation not supported" $tmp.defrag && \
+	_notrun "kernel does not support defrag --nocomp"
+
+# Need to commit the transaction or dump-tree won't grab the new
+# metadata on-disk.
+sync
+
+# Should no longer be compressed, despite the compress mount option
+check_file_extent "$SCRATCH_MNT/foo" 0 "compression 0"
+
+# Contents must survive the rewrite, read back from disk and not page cache
+_scratch_cycle_mount
+csum_after=$(_md5_checksum "$SCRATCH_MNT/foo")
+[ "$csum_before" == "$csum_after" ] || echo "file content changed"
+
+echo "Silence is golden"
+
+# success, all done
+status=0
+exit
