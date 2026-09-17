@@ -1,0 +1,128 @@
+From fef4e7180ad7ab3afa32cb04df61f78d5734a03d Mon Sep 17 00:00:00 2001
+From: Dhruva Gole <goledhruva@gmail.com>
+Date: Mon, 14 Sep 2026 02:55:19 -0700
+Subject: [PATCH] btrfs: test defrag --nocomp converts compressed extents to
+ uncompressed
+
+"btrfs filesystem defragment --nocomp" rewrites already compressed file
+data as uncompressed data. The kernel flag was added by commit
+009b2056cb25 ("btrfs: defrag: add flag to force no-compression") in
+v6.17, and the userspace option shipped in btrfs-progs v6.16. There is
+no test for it.
+
+Add a test that writes compressible data on a filesystem mounted with
+compression enabled, runs the defragment with --nocomp, and verifies
+that the extent is no longer compressed while the file contents are
+unchanged across a remount. Keeping the compress mount option in place
+for the whole test also covers the documented behaviour that the defrag
+ioctl takes precedence over the mount options.
+
+Note that a --nocomp that silently does nothing would not be caught by
+any existing test: btrfs/259 asserts that regular defrag deliberately
+leaves maximum sized compressed extents alone, so inaction and correct
+behaviour are indistinguishable without this test.
+---
+ tests/btrfs/353     | 81 +++++++++++++++++++++++++++++++++++++++++++++
+ tests/btrfs/353.out |  2 ++
+ 2 files changed, 83 insertions(+)
+ create mode 100755 tests/btrfs/353
+ create mode 100644 tests/btrfs/353.out
+
+diff --git a/tests/btrfs/353 b/tests/btrfs/353
+new file mode 100755
+index 00000000..b75eb126
+--- /dev/null
++++ b/tests/btrfs/353
+@@ -0,0 +1,81 @@
++#! /bin/bash
++# SPDX-License-Identifier: GPL-2.0
++# Copyright (c) 2026 Meta Platforms, Inc.  All Rights Reserved.
++#
++# FS QA Test 353
++#
++# Make sure "btrfs filesystem defragment --nocomp" rewrites compressed extents
++# as uncompressed ones, even though the filesystem is mounted with compression
++# enabled, and without changing the file contents.
++#
++# Note that regular defrag deliberately skips compressed extents that are
++# already at their maximum size (see btrfs/259), so a broken --nocomp that
++# simply does nothing would go unnoticed without this test.
++#
++. ./common/preamble
++_begin_fstest auto quick defrag compress
++
++. ./common/filter
++
++_require_scratch
++_require_btrfs_command inspect-internal dump-tree
++_require_btrfs_command filesystem defragment --nocomp
++_wants_kernel_commit 009b2056cb25 \
++	"btrfs: defrag: add flag to force no-compression"
++
++# Same helper as btrfs/260: btrfs specific extent attributes are only
++# available from dump-tree, not from fiemap.
++check_file_extent()
++{
++	local file="$1"
++	local offset="$2"
++	local expected="$3"
++	local ino=$(stat -c "%i" "$file")
++
++	echo "=== file extent at file '$file' offset $offset ===" >> $seqres.full
++	$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 $SCRATCH_DEV |\
++		grep -A4 "($ino EXTENT_DATA $offset)" > $tmp.output
++	cat $tmp.output >> $seqres.full
++	grep -q "$expected" $tmp.output ||\
++		echo "file \"$file\" offset $offset doesn't have expected string \"$expected\""
++}
++
++_scratch_mkfs >> $seqres.full 2>&1
++_scratch_mount -o compress=zlib
++
++# Default xfs_io pattern is highly compressible, so every extent of this file
++# ends up compressed and at the 128K maximum compressed extent size.
++$XFS_IO_PROG -f -c "pwrite 0 1m" "$SCRATCH_MNT/foo" >> $seqres.full
++sync
++
++# Should be zlib compressed
++check_file_extent "$SCRATCH_MNT/foo" 0 "compression 1"
++
++csum_before=$(_md5_checksum "$SCRATCH_MNT/foo")
++
++$BTRFS_UTIL_PROG filesystem defragment --nocomp "$SCRATCH_MNT/foo" \
++	> $tmp.defrag 2>&1
++cat $tmp.defrag >> $seqres.full
++
++# Kernels between v6.8 and v6.16 reject the unknown flag outright. Older
++# kernels ignore it silently, and there the compression check below fails.
++grep -q "Operation not supported" $tmp.defrag && \
++	_notrun "kernel does not support defrag --nocomp"
++
++# Need to commit the transaction or dump-tree won't grab the new
++# metadata on-disk.
++sync
++
++# Should no longer be compressed, despite the compress mount option
++check_file_extent "$SCRATCH_MNT/foo" 0 "compression 0"
++
++# Contents must survive the rewrite, read back from disk and not page cache
++_scratch_cycle_mount
++csum_after=$(_md5_checksum "$SCRATCH_MNT/foo")
++[ "$csum_before" == "$csum_after" ] || echo "file content changed"
++
++echo "Silence is golden"
++
++# success, all done
++status=0
++exit
+diff --git a/tests/btrfs/353.out b/tests/btrfs/353.out
+new file mode 100644
+index 00000000..16ba4f1f
+--- /dev/null
++++ b/tests/btrfs/353.out
+@@ -0,0 +1,2 @@
++QA output created by 353
++Silence is golden
+-- 
+2.53.0-Meta
+
