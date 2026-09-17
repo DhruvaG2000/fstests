@@ -39,7 +39,6 @@ tags
 /include/config.h.in
 
 # quilt
-/patches
 /.pc
 
 # custom config files
