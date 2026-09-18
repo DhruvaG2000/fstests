@@ -1,0 +1,75 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Meta Platforms, Inc.  All Rights Reserved.
+#
+# FS QA Test 354
+#
+# Make sure "btrfs filesystem defragment --nocomp" rewrites compressed extents
+# as uncompressed ones, even though the filesystem is mounted with compression
+# enabled, and without changing the file contents.
+#
+# Note that regular defrag deliberately skips compressed extents that are
+# already at their maximum size (see btrfs/259), so a broken --nocomp that
+# simply does nothing would go unnoticed without this test.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag fiemap compress
+
+. ./common/filter
+. ./common/punch # for _filter_fiemap_flags
+
+# real QA test starts here
+
+_require_scratch
+_require_xfs_io_command "fiemap"
+_require_btrfs_command filesystem defragment --nocomp
+
+_wants_kernel_commit 009b2056cb25 \
+	"btrfs: defrag: add flag to force no-compression"
+
+_scratch_mkfs >> $seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib
+
+# Probe kernel support separately from the userspace check above. Kernels
+# without the flag reject it with EOPNOTSUPP when unknown-flag validation is
+# available.
+$XFS_IO_PROG -f -c "pwrite 0 10" "$SCRATCH_MNT/probe" >> $seqres.full
+$BTRFS_UTIL_PROG filesystem defragment --nocomp "$SCRATCH_MNT/probe" \
+	>> $seqres.full 2>&1 || _notrun "defrag --nocomp not supported"
+
+# Default xfs_io pattern is highly compressible. Use a 128K block size so the
+# file lands as maximum-size compressed extents even under memory pressure,
+# and sync so that fiemap below observes stable extents.
+$XFS_IO_PROG -f -c "pwrite -b 128K 0 1m" -c "sync" \
+	"$SCRATCH_MNT/foo" >> $seqres.full
+
+# fiemap reports compressed extents with the ENCODED (0x8) flag, printed as
+# "encoded" by _filter_fiemap_flags (see btrfs/280, btrfs/281).
+$XFS_IO_PROG -c "fiemap -v" "$SCRATCH_MNT/foo" | \
+	_filter_fiemap_flags 1 > $tmp.before
+cat $tmp.before >> $seqres.full
+grep -q "encoded" $tmp.before || \
+	echo "file has no compressed extents before --nocomp defrag"
+
+csum_before=$(_md5_checksum "$SCRATCH_MNT/foo")
+
+$BTRFS_UTIL_PROG filesystem defragment --nocomp "$SCRATCH_MNT/foo" \
+	>> $seqres.full 2>&1
+
+# Should no longer be compressed, despite the compress mount option: no
+# extent of the file may still carry the ENCODED flag.
+$XFS_IO_PROG -c "fiemap -v" "$SCRATCH_MNT/foo" | \
+	_filter_fiemap_flags 1 > $tmp.after
+cat $tmp.after >> $seqres.full
+grep -q "encoded" $tmp.after && \
+	echo "file still has compressed extents after --nocomp defrag"
+
+# Contents must survive the rewrite, read back from disk and not page cache
+_scratch_cycle_mount "compress=zlib"
+csum_after=$(_md5_checksum "$SCRATCH_MNT/foo")
+[ "$csum_before" = "$csum_after" ] || echo "file content changed"
+
+echo "Silence is golden"
+
+# success, all done
+_exit 0
