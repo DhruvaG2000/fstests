@@ -1,0 +1,64 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# Verify that explicit defrag compression levels set the on-disk feature bit.
+# A compress=zstd mount or compression property would mask this regression.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress
+
+_supported_fs btrfs
+_require_scratch
+_require_test_program btrfs_defrag_level
+_require_btrfs_command inspect-internal dump-super
+_require_btrfs_command inspect-internal dump-tree
+
+# Ensure the first use of zstd is through the ioctl under test.
+export MOUNT_OPTIONS=""
+
+check_feature()
+{
+	local expected=$1
+	local flags
+
+	$BTRFS_UTIL_PROG inspect-internal dump-super "$SCRATCH_DEV" \
+		> "$tmp.super" || _fail "dump-super failed"
+	cat "$tmp.super" >> "$seqres.full"
+	flags=$(awk '$1 == "incompat_flags" { print $2; exit }' "$tmp.super")
+	[[ $flags =~ ^0x[0-9a-fA-F]+$ ]] || _fail "invalid incompat_flags"
+	if (( ((flags & 0x10) != 0) != expected )); then
+		_fail "COMPRESS_ZSTD feature bit: expected $expected"
+	fi
+}
+
+# Reformat between cases: the feature bit is sticky. Legacy is a control.
+for level in legacy 1 3 -1; do
+	echo "defrag level $level" >> "$seqres.full"
+	_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+	check_feature 0
+	_scratch_mount -o compress=no
+	file="$SCRATCH_MNT/file"
+	$XFS_IO_PROG -f -c "pwrite 0 1m" -c fsync "$file" \
+		>> "$seqres.full" || _fail "write failed"
+	before=$(_md5_checksum "$file")
+	ino=$(stat -c %i "$file")
+	$here/src/btrfs_defrag_level "$file" "$level" >> "$seqres.full" 2>&1
+	ret=$?
+	[ $ret -eq 77 ] && _notrun "defrag compression-level ioctl unsupported"
+	[ $ret -eq 0 ] || _fail "defrag failed at level $level"
+	_scratch_unmount
+
+	# Check real compressed data as well as metadata; a no-op must not pass.
+	$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 "$SCRATCH_DEV" \
+		> "$tmp.tree" || _fail "dump-tree failed"
+	grep -A4 "($ino EXTENT_DATA 0)" "$tmp.tree" > "$tmp.extent"
+	cat "$tmp.extent" >> "$seqres.full"
+	grep -q "compression 3" "$tmp.extent" || _fail "no zstd extent"
+	check_feature 1
+	_scratch_mount -o compress=no
+	[ "$before" = "$(_md5_checksum "$file")" ] || _fail "content changed"
+	_scratch_unmount
+done
+
+echo "Silence is golden"
+_exit 0

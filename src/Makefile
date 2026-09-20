@@ -150,3 +150,5 @@ install: default $(addsuffix -install,$(SUBDIRS))
 	$(MAKE) -C $* install
 
 -include .dep
+
+LINUX_TARGETS += btrfs_defrag_level
