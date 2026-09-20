@@ -13,37 +13,19 @@
 # simply does nothing would go unnoticed without this test.
 #
 . ./common/preamble
-_begin_fstest auto quick defrag compress
+_begin_fstest auto quick defrag fiemap compress
+
+. ./common/filter
+. ./common/punch # for _filter_fiemap_flags
 
 # real QA test starts here
 
 _require_scratch
-_require_btrfs_command inspect-internal dump-tree
+_require_xfs_io_command "fiemap"
 _require_btrfs_command filesystem defragment --nocomp
 
 _wants_kernel_commit 009b2056cb25 \
 	"btrfs: defrag: add flag to force no-compression"
-
-# Same helper as btrfs/260: btrfs specific extent attributes are only
-# available from dump-tree, not from fiemap.
-#
-# NOTE: At the moment this only works if the file is on a filesystem on top of
-#       the scratch device and the file is in the default subvolume (tree id 5).
-check_file_extent()
-{
-	local file="$1"
-	local offset="$2"
-	local expected="$3"
-	local ino=$(stat -c "%i" "$file")
-
-	echo "=== file extent at file '$file' offset $offset ===" >> $seqres.full
-	$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 $SCRATCH_DEV |\
-		grep -A4 "($ino EXTENT_DATA $offset)" > $tmp.output
-	cat $tmp.output >> $seqres.full
-	grep -q "$expected" $tmp.output ||\
-		echo "file \"$file\" offset $offset doesn't have expected string" \
-		     "\"$expected\""
-}
 
 _scratch_mkfs >> $seqres.full 2>&1 || _fail "mkfs failed"
 _scratch_mount -o compress=zlib
@@ -55,30 +37,31 @@ $XFS_IO_PROG -f -c "pwrite 0 10" "$SCRATCH_MNT/probe" >> $seqres.full
 $BTRFS_UTIL_PROG filesystem defragment --nocomp "$SCRATCH_MNT/probe" \
 	>> $seqres.full 2>&1 || _notrun "defrag --nocomp not supported"
 
-# Default xfs_io pattern is highly compressible, so every extent of this file
-# ends up compressed and at the 128K maximum compressed extent size.
-$XFS_IO_PROG -f -c "pwrite 0 1m" "$SCRATCH_MNT/foo" >> $seqres.full
-$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+# Default xfs_io pattern is highly compressible. Use a 128K block size so the
+# file lands as maximum-size compressed extents even under memory pressure,
+# and sync so that fiemap below observes stable extents.
+$XFS_IO_PROG -f -c "pwrite -b 128K 0 1m" -c "sync" \
+	"$SCRATCH_MNT/foo" >> $seqres.full
 
-# Should be zlib compressed
-check_file_extent "$SCRATCH_MNT/foo" 0 "compression 1"
+# fiemap reports compressed extents with the ENCODED (0x8) flag, printed as
+# "encoded" by _filter_fiemap_flags (see btrfs/280, btrfs/281).
+$XFS_IO_PROG -c "fiemap -v" "$SCRATCH_MNT/foo" | \
+	_filter_fiemap_flags 1 > $tmp.before
+cat $tmp.before >> $seqres.full
+grep -q "encoded" $tmp.before || \
+	echo "file has no compressed extents before --nocomp defrag"
 
 csum_before=$(_md5_checksum "$SCRATCH_MNT/foo")
 
 $BTRFS_UTIL_PROG filesystem defragment --nocomp "$SCRATCH_MNT/foo" \
 	>> $seqres.full 2>&1
 
-# Need to commit the transaction or dump-tree won't grab the new
-# metadata on-disk.
-$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
-
-# Should no longer be compressed, despite the compress mount option
-check_file_extent "$SCRATCH_MNT/foo" 0 "compression 0"
-
-# No extent of this inode may remain compressed
-ino=$(stat -c "%i" "$SCRATCH_MNT/foo")
-$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 $SCRATCH_DEV |
-	grep -A4 "($ino EXTENT_DATA " | grep -q "compression [^0]" &&
+# Should no longer be compressed, despite the compress mount option: no
+# extent of the file may still carry the ENCODED flag.
+$XFS_IO_PROG -c "fiemap -v" "$SCRATCH_MNT/foo" | \
+	_filter_fiemap_flags 1 > $tmp.after
+cat $tmp.after >> $seqres.full
+grep -q "encoded" $tmp.after && \
 	echo "file still has compressed extents after --nocomp defrag"
 
 # Contents must survive the rewrite, read back from disk and not page cache
