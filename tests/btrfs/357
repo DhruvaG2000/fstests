@@ -1,0 +1,67 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Inline NOCOMPRESS eligibility and short EOF tails.
+. ./common/preamble
+_begin_fstest auto quick defrag compress
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_btrfs_command inspect-internal dump-tree
+_require_btrfs_support_sectorsize 4096
+_scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib,max_inline=4096 || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/inline"
+_nc_write "$file" 0 2048 0x34
+digest=$(_md5_checksum "$file")
+inline_digest=$digest
+ino=$(stat -c %i "$file")
+_scratch_unmount || _fail "unmount failed"
+$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 "$SCRATCH_DEV" \
+	> "$tmp.tree" 2>> "$seqres.full" || _fail "dump-tree failed"
+grep -A5 "($ino EXTENT_DATA 0)" "$tmp.tree" > "$tmp.inline" || _fail "inline extent missing"
+cat "$tmp.inline" >> "$seqres.full"
+grep -q 'type 0' "$tmp.inline" || _fail "fixture is not inline"
+grep -q 'compression 1' "$tmp.inline" || _fail "fixture is not compressed inline"
+_scratch_mount -o compress=zlib,max_inline=4096 || _fail "mount failed"
+_nc_defrag "$file"
+_nc_same "$digest" "$(_md5_checksum "$file")"
+_scratch_unmount || _fail "unmount failed"
+$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 "$SCRATCH_DEV" \
+	> "$tmp.tree" 2>> "$seqres.full" || _fail "dump-tree failed"
+grep -A5 "($ino EXTENT_DATA 0)" "$tmp.tree" > "$tmp.inline" || _fail "inline extent disappeared"
+grep -q 'type 0' "$tmp.inline" || _fail "eligible inline extent was rewritten"
+_scratch_mount -o compress=zlib,max_inline=0 || _fail "mount failed"
+_nc_defrag "$file"
+_nc_unencoded "$file" 0 2048
+_nc_same "$digest" "$(_md5_checksum "$file")"
+_scratch_unmount || _fail "unmount failed"
+$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 "$SCRATCH_DEV" \
+	> "$tmp.tree" 2>> "$seqres.full" || _fail "dump-tree failed"
+grep -A5 "($ino EXTENT_DATA 0)" "$tmp.tree" > "$tmp.regular" ||
+	_fail "converted extent missing"
+cat "$tmp.regular" >> "$seqres.full"
+grep -q 'type 1' "$tmp.regular" || _fail "converted extent is not regular"
+grep -q 'compression 0' "$tmp.regular" || _fail "converted extent remains compressed"
+_scratch_mount -o compress=zlib,max_inline=0 || _fail "mount failed"
+
+for length in 1 4095 4097 131073; do
+	f="$SCRATCH_MNT/tail-$length"
+	_nc_write "$f" 0 "$length" 0x36
+	digest=$(_md5_checksum "$f")
+	if [ "$length" -gt 4096 ]; then
+		_nc_encoded "$f" 0 4096
+	fi
+	_nc_defrag "$f"
+	[ "$(stat -c %s "$f")" -eq "$length" ] || _fail "tail size changed"
+	_nc_same "$digest" "$(_md5_checksum "$f")"
+	if [ "$length" -gt 4096 ]; then
+		_nc_unencoded "$f" 0 4096
+	fi
+done
+_scratch_cycle_mount compress=zlib,max_inline=0 || _fail "remount failed"
+_nc_same "$digest" "$(_md5_checksum "$f")"
+_nc_same "$inline_digest" "$(_md5_checksum "$file")"
+echo "Silence is golden"
+_exit 0
