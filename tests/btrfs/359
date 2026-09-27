@@ -1,0 +1,58 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# NOCOMPRESS must COW only the converted inode, leaving shared copies intact.
+. ./common/preamble
+_begin_fstest auto quick defrag compress clone snapshot fiemap
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_xfs_io_command reflink
+_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+$BTRFS_UTIL_PROG subvolume create "$SCRATCH_MNT/base" \
+	>> "$seqres.full" 2>&1 || _fail "subvolume create failed"
+source="$SCRATCH_MNT/base/source"
+clone="$SCRATCH_MNT/base/clone"
+snap="$SCRATCH_MNT/snap/source"
+_nc_write "$source" 0 512K 0x45
+$XFS_IO_PROG -f -c "reflink $source" "$clone" \
+	>> "$seqres.full" 2>&1 || _fail "reflink failed"
+$BTRFS_UTIL_PROG subvolume snapshot -r "$SCRATCH_MNT/base" "$SCRATCH_MNT/snap" \
+	>> "$seqres.full" 2>&1 || _fail "snapshot failed"
+sync
+digest=$(_md5_checksum "$source")
+for f in "$source" "$clone" "$snap"; do
+	_nc_encoded "$f" 0 128K
+	_nc_same "$digest" "$(_md5_checksum "$f")"
+done
+_nc_map "$clone" 0 128K
+$XFS_IO_PROG -c 'fiemap -v 0 128K' "$clone" | _filter_fiemap_flags 1 \
+	> "$tmp.shared" || _fail "sharing fiemap failed"
+grep -qi shared "$tmp.shared" || _fail "reflink fixture not shared"
+_nc_defrag "$source"
+_nc_unencoded "$source" 0 512K
+_nc_same "$digest" "$(_md5_checksum "$source")"
+for f in "$clone" "$snap"; do
+	_nc_encoded "$f" 0 128K
+	_nc_same "$digest" "$(_md5_checksum "$f")"
+done
+_nc_write "$source" 0 128K 0x46
+cp "$clone" "$tmp.expected" || _fail "expected copy failed"
+$XFS_IO_PROG -c 'pwrite -S 0x46 0 128K' "$tmp.expected" \
+	>> "$seqres.full" 2>&1 || _fail "expected overwrite failed"
+modified=$(_md5_checksum "$tmp.expected")
+_nc_same "$modified" "$(_md5_checksum "$source")"
+for f in "$clone" "$snap"; do
+	_nc_same "$digest" "$(_md5_checksum "$f")"
+done
+rm -f "$clone" || _fail "clone removal failed"
+sync
+_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_nc_same "$digest" "$(_md5_checksum "$snap")"
+_nc_same "$modified" "$(_md5_checksum "$source")"
+_nc_encoded "$snap" 0 128K
+_nc_unencoded "$source" 256K 128K
+echo "Silence is golden"
+_exit 0
