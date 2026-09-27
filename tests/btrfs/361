@@ -1,0 +1,65 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# NOCOMPRESS racing write and punch workers must make forward progress.
+. ./common/preamble
+_begin_fstest auto stress defrag compress punch
+_cleanup()
+{
+	[ -n "$writer" ] && kill "$writer" 2>/dev/null
+	[ -n "$puncher" ] && kill "$puncher" 2>/dev/null
+	wait "$writer" "$puncher" 2>/dev/null
+	cd /
+	rm -f "$tmp".*
+}
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_xfs_io_command fpunch
+_require_command "$(command -v timeout)" timeout
+writer=
+puncher=
+_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/race"
+_nc_write "$file" 0 1M 0x51
+cp "$file" "$tmp.expected" || _fail "expected image copy failed"
+$XFS_IO_PROG -c 'pwrite -S 0x71 0 128K' -c 'fpunch 512K 128K' \
+	"$tmp.expected" >> "$seqres.full" 2>&1 || _fail "expected image failed"
+expected=$(_md5_checksum "$tmp.expected")
+(
+	for i in {1..30}; do
+		$XFS_IO_PROG -c 'pwrite -S 0x62 0 128K' "$file" \
+			>> "$seqres.full" 2>&1 || exit 1
+	done
+) & writer=$!
+(
+	for i in {1..30}; do
+		$XFS_IO_PROG -c 'fpunch 512K 128K' \
+			-c 'pwrite -S 0x63 512K 128K' "$file" \
+			>> "$seqres.full" 2>&1 || exit 1
+	done
+) & puncher=$!
+for i in {1..20}; do
+	timeout 120 "$BTRFS_UTIL_PROG" filesystem defragment --nocomp \
+		-s 0 -l 768K "$file" >> "$seqres.full" 2>&1 ||
+		_fail "racing NOCOMPRESS failed or timed out"
+done
+wait "$writer" || _fail "writer failed"
+writer=
+wait "$puncher" || _fail "puncher failed"
+puncher=
+$XFS_IO_PROG -c 'pwrite -S 0x71 0 128K' -c 'fpunch 512K 128K' \
+	-c fsync "$file" >> "$seqres.full" 2>&1 || _fail "final fixture failed"
+_nc_defrag -s 0 -l 768K "$file"
+_nc_unencoded "$file" 0 128K
+_nc_same "$expected" "$(_md5_checksum "$file")"
+hole=$($XFS_IO_PROG -c 'fiemap 524288 131072' "$file" | _filter_xfs_io_fiemap | head -n1)
+[ -z "$hole" ] || _fail "punched hole reallocated"
+digest=$(_md5_checksum "$file")
+_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_nc_same "$digest" "$(_md5_checksum "$file")"
+_nc_same "$expected" "$(_md5_checksum "$file")"
+echo "Silence is golden"
+_exit 0
