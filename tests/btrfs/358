@@ -1,0 +1,54 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# NOCOMPRESS is a transient defrag policy, not an inode compression change.
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_test_lsattr
+_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+_nc_probe_algorithm zstd
+for mode in zlib force property; do
+	case "$mode" in
+	zlib) _scratch_remount compress=zlib || _fail "remount failed" ;;
+	force) _scratch_remount compress-force=zstd || _fail "remount failed" ;;
+	property) _scratch_remount compress=no || _fail "remount failed" ;;
+	esac
+	file="$SCRATCH_MNT/$mode"
+	if [ "$mode" = property ]; then
+		: > "$file"
+		$BTRFS_UTIL_PROG property set "$file" compression zlib \
+			>> "$seqres.full" 2>&1 || _fail "property setup failed"
+	fi
+	_nc_write "$file" 0 128K 0x61
+	_nc_encoded "$file" 0 128K
+	flags=$(lsattr -d "$file" | awk '{print $1}')
+	property=$($BTRFS_UTIL_PROG property get "$file" compression) || _fail "property query failed"
+	_nc_defrag "$file"
+	_nc_unencoded "$file" 0 128K
+	_nc_write "$file" 128K 128K 0x62
+	_nc_encoded "$file" 128K 128K
+	_nc_unencoded "$file" 0 128K
+	[ "$flags" = "$(lsattr -d "$file" | awk '{print $1}')" ] || _fail "inode flags changed"
+	[ "$property" = "$($BTRFS_UTIL_PROG property get "$file" compression)" ] || _fail "property changed"
+	digest=$(_md5_checksum "$file")
+	_scratch_cycle_mount || _fail "remount failed"
+	_nc_same "$digest" "$(_md5_checksum "$file")"
+done
+_scratch_remount compress=zlib || _fail "remount failed"
+file="$SCRATCH_MNT/sequence"
+_nc_write "$file" 0 128K 0x48
+$BTRFS_UTIL_PROG filesystem defragment -czstd -L 1 "$file" \
+	>> "$seqres.full" 2>&1 || _fail "level setup failed"
+sync
+_nc_encoded "$file" 0 128K
+_nc_defrag "$file"
+_nc_unencoded "$file" 0 128K
+_nc_write "$file" 128K 128K 0x49
+_nc_encoded "$file" 128K 128K
+echo "Silence is golden"
+_exit 0
