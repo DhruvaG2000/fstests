@@ -1,0 +1,79 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Expansion ENOSPC must preserve data and leave policy usable for a retry.
+. ./common/preamble
+_begin_fstest auto enospc defrag compress
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_command "$(command -v timeout)" timeout
+_scratch_mkfs_sized $((256 * 1024 * 1024)) \
+	>> "$seqres.full" 2>&1 || _fail "sized mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/payload"
+_nc_write "$file" 0 64M 0x55
+_nc_encoded "$file" 0 128K
+digest=$(_md5_checksum "$file")
+_scratch_remount compress=no || _fail "remount failed"
+filler="$SCRATCH_MNT/filler"
+# Keep the fixture bounded, with enough committed incompressible data that
+# expanding a 64M compressed file cannot fit.
+for i in {0..24}; do
+	free=$(df -B1 --output=avail "$SCRATCH_MNT" | tail -n1)
+	[ "$free" -lt $((24 * 1024 * 1024)) ] && break
+	$XFS_IO_PROG -f -c "pwrite -S 0x73 $((i * 8 * 1024 * 1024)) 8M" \
+		-c fsync "$filler" >> "$seqres.full" 2>&1 || break
+done
+sync
+free=$(df -B1 --output=avail "$SCRATCH_MNT" | tail -n1)
+echo "remaining bytes: $free" >> "$seqres.full"
+[ "$free" -lt $((64 * 1024 * 1024)) ] || _fail "ENOSPC fixture did not consume enough space"
+conversion_failed=0
+fsync_failed=0
+if LC_ALL=C timeout 180 "$BTRFS_UTIL_PROG" filesystem defragment --nocomp "$file" \
+	> "$tmp.convert" 2>&1; then
+    echo 'initial ioctl completed' >> "$seqres.full"
+else
+    conversion_failed=1
+fi
+# Delayed allocation errors can surface at fsync rather than ioctl.
+if ! LC_ALL=C timeout 180 "$XFS_IO_PROG" -c fsync "$file" \
+	> "$tmp.fsync" 2>&1; then
+    fsync_failed=1
+fi
+echo "conversion_failed=$conversion_failed fsync_failed=$fsync_failed" >> "$seqres.full"
+cat "$tmp.convert" "$tmp.fsync" >> "$seqres.full"
+if [ "$conversion_failed" -eq 1 ]; then
+    grep -q 'No space left on device' "$tmp.convert" ||
+        _fail "conversion failed for a reason other than ENOSPC"
+fi
+if [ "$conversion_failed" -eq 0 ] && [ "$fsync_failed" -eq 0 ]; then
+    # After partial progress the ioctl may return success.  Some compressed
+    # extents must remain, or this fixture did not hit the expansion limit.
+    _nc_map "$file" 0 64M
+    _filter_fiemap_flags 1 < "$tmp.nc-map" > "$tmp.nc-flags" ||
+        _fail "partial-progress fiemap failed"
+    grep -q encoded "$tmp.nc-flags" ||
+        _fail "ENOSPC fixture converted every extent without error"
+    echo 'partial conversion left encoded extents' >> "$seqres.full"
+fi
+if [ "$fsync_failed" -eq 1 ]; then
+    grep -q 'No space left on device' "$tmp.fsync" ||
+        _fail "fsync failed for a reason other than ENOSPC"
+fi
+_nc_same "$digest" "$(_md5_checksum "$file")"
+rm -f "$filler" || _fail "filler removal failed"
+sync
+_nc_defrag "$file"
+_nc_unencoded "$file" 0 64M
+_nc_same "$digest" "$(_md5_checksum "$file")"
+_scratch_remount compress=zlib || _fail "remount failed"
+_nc_write "$file" 64M 128K 0x56
+_nc_encoded "$file" 64M 128K
+digest=$(_md5_checksum "$file")
+_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_nc_same "$digest" "$(_md5_checksum "$file")"
+echo "Silence is golden"
+_exit 0
