@@ -1,0 +1,50 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Fsynced NOCOMPRESS conversion survives dm-flakey log replay.
+. ./common/preamble
+_begin_fstest auto log defrag compress clone
+_cleanup()
+{
+	_cleanup_flakey
+	cd /
+	rm -f "$tmp".*
+}
+. ./common/filter
+. ./common/punch
+. ./common/dmflakey
+. ./common/btrfs_nocomp
+_nc_require
+_require_dm_target flakey
+_require_xfs_io_command reflink
+_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_require_metadata_journaling "$SCRATCH_DEV"
+_init_flakey
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/logged"
+clone="$SCRATCH_MNT/clone"
+_nc_write "$file" 0 512K 0x41
+_nc_write "$tmp.expected" 0 512K 0x41
+$XFS_IO_PROG -c 'pwrite -S 0x42 384K 128K' "$tmp.expected" \
+	>> "$seqres.full" 2>&1 || _fail "expected overwrite failed"
+expected=$(_md5_checksum "$tmp.expected")
+$XFS_IO_PROG -f -c "reflink $file" "$clone" \
+	>> "$seqres.full" 2>&1 || _fail "reflink failed"
+baseline=$(_md5_checksum "$clone")
+_nc_same "$baseline" "$(_md5_checksum "$file")"
+sync
+$BTRFS_UTIL_PROG filesystem defragment --nocomp -s 128K -l 128K "$file" \
+	>> "$seqres.full" 2>&1 || _fail "conversion failed"
+_nc_write "$file" 384K 128K 0x42
+$XFS_IO_PROG -c fsync "$file" >> "$seqres.full" 2>&1 || _fail "fsync failed"
+_nc_same "$expected" "$(_md5_checksum "$file")"
+size=$(stat -c %s "$file")
+_flakey_drop_and_remount
+_nc_same "$expected" "$(_md5_checksum "$file")"
+_nc_same "$baseline" "$(_md5_checksum "$clone")"
+[ "$(stat -c %s "$file")" -eq "$size" ] || _fail "replayed size wrong"
+_nc_unencoded "$file" 128K 128K
+_nc_encoded "$clone" 128K 128K
+_scratch_unmount
+echo "Silence is golden"
+_exit 0
