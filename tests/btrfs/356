@@ -1,0 +1,55 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# NOCOMPRESS skips sparse and preallocated regions.
+. ./common/preamble
+_begin_fstest auto quick defrag compress prealloc fiemap
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_xfs_io_command falloc
+_require_btrfs_command inspect-internal dump-tree
+_require_btrfs_support_sectorsize 4096
+_scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/islands"
+_nc_write "$file" 0 128K 0x31
+_nc_write "$file" 512K 128K 0x32
+_nc_write "$file" 1M 128K 0x33
+_nc_encoded "$file" 0 128K
+_nc_encoded "$file" 512K 128K
+_nc_encoded "$file" 1M 128K
+$XFS_IO_PROG -c 'falloc 256K 128K' -c 'falloc -k 1280K 128K' -c fsync \
+	"$file" >> "$seqres.full" 2>&1 || _fail "fallocate failed"
+# The second reservation lies beyond EOF and must not extend the file.
+[ "$(stat -c %s "$file")" -eq 1179648 ] || _fail "fallocate extended EOF"
+oldpre=$(_get_file_extent_sector "$file" 262144)
+[ -n "$oldpre" ] || _fail "prealloc fixture missing"
+digest=$(_md5_checksum "$file")
+ino=$(stat -c %i "$file")
+_nc_defrag "$file"
+for offset in 0 524288 1048576; do
+	_nc_unencoded "$file" "$offset" 128K
+done
+newpre=$(_get_file_extent_sector "$file" 262144)
+[ "$oldpre" = "$newpre" ] || _fail "prealloc mapping changed"
+_nc_map "$file" 262144 4096
+$XFS_IO_PROG -c 'fiemap -v 262144 4096' "$file" | _filter_fiemap_flags 1 \
+	> "$tmp.prealloc" || _fail "prealloc fiemap failed"
+grep -qi unwritten "$tmp.prealloc" || _fail "prealloc became written"
+hole=$($XFS_IO_PROG -c 'fiemap 393216 65536' "$file" | _filter_xfs_io_fiemap | head -n1)
+[ -z "$hole" ] || _fail "hole became mapped"
+_nc_same "$digest" "$(_md5_checksum "$file")"
+_scratch_unmount || _fail "unmount failed"
+$BTRFS_UTIL_PROG inspect-internal dump-tree -t 5 "$SCRATCH_DEV" \
+	> "$tmp.tree" 2>> "$seqres.full" || _fail "dump-tree failed"
+grep -A4 "($ino EXTENT_DATA 1310720)" "$tmp.tree" > "$tmp.beyond" ||
+	_fail "beyond-EOF prealloc extent missing"
+cat "$tmp.beyond" >> "$seqres.full"
+grep -q 'type 2' "$tmp.beyond" || _fail "beyond-EOF reservation changed"
+_scratch_mount -o compress=zlib || _fail "remount failed"
+_nc_same "$digest" "$(_md5_checksum "$file")"
+[ "$(stat -c %s "$file")" -eq 1179648 ] || _fail "size changed"
+echo "Silence is golden"
+_exit 0
