@@ -1,0 +1,56 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# T13: stepped decompression must not cross the requested range end.
+# Kept out of auto pending validation and a btrfs-progs fix: the reviewed
+# progs baseline submits a full last step rather than clipping it to len.
+#
+. ./common/preamble
+_begin_fstest defrag compress fiemap
+
+. ./common/filter
+. ./common/punch
+
+. ./common/btrfs_nocomp
+
+_nc_require
+_require_btrfs_support_sectorsize 4096
+_require_btrfs_command filesystem defragment --step
+
+_scratch_mkfs -s 4k >> $seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+
+check_encoding()
+{
+	if [ "$3" = encoded ]; then
+		_nc_encoded "$1" "$2" 4096
+	else
+		_nc_unencoded "$1" "$2" 4096
+	fi
+}
+for mode in whole steps large_step; do
+	file=$SCRATCH_MNT/$mode
+	$XFS_IO_PROG -f -c 'pwrite -b 128K 0 4M' -c fsync "$file" \
+		>> $seqres.full 2>&1 || _fail "fixture write failed"
+	check_encoding "$file" 1048576 encoded
+	check_encoding "$file" 1441792 encoded
+	before=$(_md5_checksum "$file")
+	args=()
+	[ "$mode" = steps ] && args=(--step 256K)
+	[ "$mode" = large_step ] && args=(--step 1M)
+	$BTRFS_UTIL_PROG filesystem defragment --nocomp -s 1M -l 384K \
+		"${args[@]}" "$file" >> $seqres.full 2>&1 || _fail "defrag failed"
+	$XFS_IO_PROG -c fsync "$file" >> $seqres.full 2>&1 || _fail "fsync failed"
+	# All boundaries coincide with the original 128K compression units.
+	check_encoding "$file" 1048576 plain
+	check_encoding "$file" 1310720 plain
+	check_encoding "$file" 1441792 encoded
+	check_encoding "$file" 917504 encoded
+	_scratch_cycle_mount "compress=zlib" || _fail "remount failed"
+	[ "$before" = "$(_md5_checksum "$file")" ] || _fail "data changed"
+	[ "$(stat -c %s "$file")" = 4194304 ] || _fail "size changed"
+done
+
+echo "Silence is golden"
+_exit 0
