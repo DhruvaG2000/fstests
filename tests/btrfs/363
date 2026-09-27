@@ -1,0 +1,47 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Raw DEFRAG_RANGE validation must reject bad flags before changing data.
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/abi"
+_nc_write "$file" 0 256K 0x57
+_nc_encoded "$file" 0 128K
+digest=$(_md5_checksum "$file")
+mapping=$(_get_file_extent_sector "$file" 0)
+for startio in 0 2; do
+	_nc_raw_expect EINVAL "$file" "$((9 | startio))" 0 131072 1 0
+	_nc_raw_expect EOPNOTSUPP "$file" "$((0x80000000 | startio))" 0 131072 0 0
+	_nc_same "$digest" "$(_md5_checksum "$file")"
+	_nc_encoded "$file" 0 128K
+	[ "$mapping" = "$(_get_file_extent_sector "$file" 0)" ] || _fail "rejected ioctl rewrote extent"
+done
+# COMPRESS_LEVEL without COMPRESS is ignored by this kernel contract.
+_nc_raw_expect OK "$file" 4 0 131072 1 1
+_nc_raw_expect OK "$file" 8 0 131072 0 0
+sync
+_nc_unencoded "$file" 0 128K
+_nc_raw_expect OK "$file" 1 0 131072 1 0
+sync
+_nc_encoded "$file" 0 128K
+_nc_same "$digest" "$(_md5_checksum "$file")"
+$BTRFS_UTIL_PROG subvolume create "$SCRATCH_MNT/sub" \
+	>> "$seqres.full" 2>&1 || _fail "subvolume create failed"
+cp "$file" "$SCRATCH_MNT/sub/read-only" || _fail "copy failed"
+$BTRFS_UTIL_PROG property set "$SCRATCH_MNT/sub/read-only" compression zlib \
+	>> "$seqres.full" 2>&1 || _fail "property set failed"
+sync
+$BTRFS_UTIL_PROG property get "$SCRATCH_MNT/sub/read-only" compression >> "$seqres.full"
+$BTRFS_UTIL_PROG subvolume snapshot -r "$SCRATCH_MNT/sub" "$SCRATCH_MNT/readonly" \
+	>> "$seqres.full" 2>&1 || _fail "snapshot failed"
+_nc_raw_expect EROFS "$SCRATCH_MNT/readonly/read-only" 8 0 131072 0 0
+_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_nc_same "$digest" "$(_md5_checksum "$file")"
+echo "Silence is golden"
+_exit 0
