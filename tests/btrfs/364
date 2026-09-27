@@ -1,0 +1,75 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Compression level ABI bounds, including signed zstd s8 levels.
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_scratch_mkfs >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=no || _fail "mount failed"
+_nc_probe
+_nc_probe_algorithm zstd
+_nc_probe_algorithm lzo
+
+row=0
+for spec in 'zlib 1 OK' 'zlib 9 OK' 'zlib 0 OK' \
+	'zlib -1 EINVAL' 'zlib 10 EINVAL' \
+	'zstd -15 OK' 'zstd -1 OK' 'zstd 0 OK' 'zstd 1 OK' 'zstd 15 OK' \
+	'zstd -16 EINVAL' 'zstd 16 EINVAL' \
+	'lzo 0 OK' 'lzo 1 OK' 'lzo 2 EINVAL'; do
+	set -- $spec
+	algorithm=$1 level=$2 expected=$3
+	row=$((row + 1))
+	file="$SCRATCH_MNT/cli-$row"
+	_nc_write "$file" 0 128K 0x52
+	digest=$(_md5_checksum "$file")
+	mapping=$(_get_file_extent_sector "$file" 0)
+	if LC_ALL=C $BTRFS_UTIL_PROG filesystem defragment "-c$algorithm" -L "$level" "$file" \
+		> "$tmp.cli" 2>&1; then
+		actual=OK
+	else
+		actual=EINVAL
+		grep -qi 'Invalid argument' "$tmp.cli" ||
+			_fail "CLI $algorithm $level failed for another reason"
+	fi
+	cat "$tmp.cli" >> "$seqres.full"
+	[ "$actual" = "$expected" ] || _fail "CLI $algorithm $level: $actual, expected $expected"
+	sync
+	_nc_same "$digest" "$(_md5_checksum "$file")"
+	if [ "$expected" = OK ]; then
+		_nc_encoded "$file" 0 128K
+	else
+		[ "$mapping" = "$(_get_file_extent_sector "$file" 0)" ] || _fail "invalid level rewrote extent"
+		_nc_unencoded "$file" 0 128K
+	fi
+done
+
+# In the raw ABI, COMPRESS_LEVEL with zlib level 0 is invalid; the CLI omits
+# the flag for -L0.  LZO has source-defined 0..1 accepted bounds.
+row=0
+for spec in '1 1 OK' '1 9 OK' '1 0 EINVAL' \
+	'1 -1 EINVAL' '1 10 EINVAL' \
+	'3 -15 OK' '3 15 OK' '3 -16 EINVAL' '3 16 EINVAL' \
+	'2 0 OK' '2 1 OK' '2 2 EINVAL' '4 1 EINVAL'; do
+	set -- $spec
+	type=$1 level=$2 expected=$3
+	row=$((row + 1))
+	file="$SCRATCH_MNT/raw-$row"
+	_nc_write "$file" 0 128K 0x53
+	digest=$(_md5_checksum "$file")
+	mapping=$(_get_file_extent_sector "$file" 0)
+	_nc_raw_expect "$expected" "$file" 5 0 131072 "$type" "$level"
+	sync
+	_nc_same "$digest" "$(_md5_checksum "$file")"
+	if [ "$expected" = OK ]; then
+		_nc_encoded "$file" 0 128K
+	else
+		[ "$mapping" = "$(_get_file_extent_sector "$file" 0)" ] || _fail "invalid raw level rewrote extent"
+	fi
+done
+_scratch_cycle_mount compress=no || _fail "remount failed"
+_nc_encoded "$SCRATCH_MNT/raw-1" 0 128K
+echo "Silence is golden"
+_exit 0
