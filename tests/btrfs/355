@@ -1,0 +1,60 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Bounded NOCOMPRESS conversion and EOF arithmetic.
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+. ./common/filter
+. ./common/punch
+. ./common/btrfs_nocomp
+_nc_require
+_require_btrfs_support_sectorsize 4096
+_scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+file="$SCRATCH_MNT/range"
+_nc_write "$file" 0 4M 0x5a
+before=$(_md5_checksum "$file")
+size=$(stat -c %s "$file")
+_nc_encoded "$file" 0 128K
+_nc_encoded "$file" 2M 128K
+_nc_encoded "$file" 3968K 128K
+prefix=$(_get_file_extent_sector "$file" 0)
+suffix=$(_get_file_extent_sector "$file" 4063232)
+_nc_defrag -s 1M -l 512K "$file"
+_nc_unencoded "$file" 1M 512K
+_nc_encoded "$file" 0 128K
+_nc_encoded "$file" 2M 128K
+_nc_encoded "$file" 3968K 128K
+[ "$prefix" = "$(_get_file_extent_sector "$file" 0)" ] || _fail "prefix mapping changed"
+[ "$suffix" = "$(_get_file_extent_sector "$file" 4063232)" ] || _fail "suffix mapping changed"
+_nc_same "$before" "$(_md5_checksum "$file")"
+
+# The final unaligned byte range is aligned by the kernel to a sector.
+tail="$SCRATCH_MNT/partial"
+_nc_write "$tail" 0 136K 0x39
+digest=$(_md5_checksum "$tail")
+_nc_encoded "$tail" 128K 4K
+_nc_defrag -s 128K -l 1 "$tail"
+_nc_unencoded "$tail" 128K 4K
+_nc_same "$digest" "$(_md5_checksum "$tail")"
+
+for mode in zero huge; do
+	f="$SCRATCH_MNT/$mode"
+	_nc_write "$f" 0 256K 0x38
+	digest=$(_md5_checksum "$f")
+	case "$mode" in
+	zero) _nc_defrag -s 128K -l 0 "$f" ;;
+	huge) _nc_defrag -s 128K -l 16M "$f" ;;
+	esac
+	_nc_encoded "$f" 0 128K
+	_nc_unencoded "$f" 128K 128K
+	_nc_same "$digest" "$(_md5_checksum "$f")"
+done
+_nc_raw_expect EINVAL "$file" 8 "$size" 4096 0 0
+touch "$SCRATCH_MNT/empty"
+_nc_raw_expect OK "$SCRATCH_MNT/empty" 8 0 0 0 0
+_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_nc_same "$before" "$(_md5_checksum "$file")"
+[ "$(stat -c %s "$file")" -eq "$size" ] || _fail "file size changed"
+echo "Silence is golden"
+_exit 0
