@@ -1,0 +1,59 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# FS QA Test 357
+#
+# Verify NOCOMPRESS inline eligibility and short EOF tails.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+
+. ./common/filter
+. ./common/btrfs_nocomp
+
+_nc_require
+_require_btrfs_inline_extents_creation
+_scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib,max_inline=4096
+_nc_probe
+
+file="$SCRATCH_MNT/inline"
+_nc_write "$file" 0 2048 0x34
+_nc_save_file "$file"
+_nc_check_range "$file" 0 2048 inline
+_nc_defrag "$file"
+_nc_check_range "$file" 0 2048 inline
+_nc_verify_files
+_scratch_cycle_mount compress=zlib,max_inline=4096
+_nc_check_range "$file" 0 2048 inline
+_nc_verify_files
+
+# Lowering max_inline makes the same extent eligible for conversion.
+_scratch_cycle_mount compress=zlib,max_inline=0
+_nc_defrag "$file"
+_nc_check_range "$file" 0 2048 regular
+_nc_verify_files
+
+for length in 1 4095 4097 131073; do
+	f="$SCRATCH_MNT/tail-$length"
+	_nc_write "$f" 0 "$length" 0x36
+	_nc_save_file "$f"
+	# One-sector files cannot save a sector through compression. The larger
+	# fixtures must contain compressed data before testing conversion.
+	if [ "$length" -gt 4096 ]; then
+		_nc_check_range "$f" 0 4096 compressed
+	fi
+	_nc_defrag "$f"
+	_nc_check_range "$f" 0 "$length" regular
+done
+_nc_verify_files
+_scratch_cycle_mount compress=zlib,max_inline=0
+_nc_verify_files
+_nc_check_range "$file" 0 2048 regular
+for length in 1 4095 4097 131073; do
+	_nc_check_range "$SCRATCH_MNT/tail-$length" 0 "$length" regular
+done
+
+echo "Silence is golden"
+_exit 0
