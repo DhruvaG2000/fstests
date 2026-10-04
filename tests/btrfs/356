@@ -1,0 +1,66 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Verify NOCOMPRESS skips holes and preallocated extents.
+. ./common/preamble
+_begin_fstest auto quick defrag compress prealloc fiemap
+
+. ./common/filter
+. ./common/btrfs_nocomp
+
+_nc_require
+_require_xfs_io_command falloc -k
+_scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib || _fail "mount failed"
+_nc_probe
+
+file="$SCRATCH_MNT/islands"
+_nc_write "$file" 0 131072 0x31
+_nc_write "$file" 524288 131072 0x32
+_nc_write "$file" 1048576 131072 0x33
+for offset in 0 524288 1048576; do
+	_nc_check_range "$file" "$offset" 131072 compressed
+done
+$XFS_IO_PROG -c 'falloc 256K 128K' -c 'falloc -k 1280K 128K' -c fsync \
+	"$file" >> "$seqres.full" 2>&1 || _fail "fallocate failed"
+[ "$(stat -c %s "$file")" = 1179648 ] || _fail "fallocate extended EOF"
+_nc_save_file "$file"
+
+check_layout()
+{
+	local offset
+
+	for offset in 262144 1310720; do
+		_nc_check_range "$file" "$offset" 131072 prealloc
+		_nc_mapping "$file" "$offset" 131072 > "$tmp.prealloc-$offset-now"
+		cmp -s "$tmp.prealloc-$offset" "$tmp.prealloc-$offset-now" ||
+			_fail "prealloc mapping changed at $offset"
+	done
+	_nc_check_range "$file" 131072 131072 hole
+	_nc_check_range "$file" 393216 131072 hole
+	_nc_check_range "$file" 655360 393216 hole
+	_nc_check_range "$file" 1179648 131072 hole
+}
+
+# Include the KEEP_SIZE reservation beyond EOF in the baseline. FIEMAP
+# reports preallocation there even though there are no bytes to read.
+for offset in 262144 1310720; do
+	_nc_check_range "$file" "$offset" 131072 prealloc
+	_nc_mapping "$file" "$offset" 131072 > "$tmp.prealloc-$offset"
+done
+check_layout
+_nc_defrag "$file"
+for offset in 0 524288 1048576; do
+	_nc_check_range "$file" "$offset" 131072 regular
+done
+check_layout
+_nc_verify_files
+
+_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_nc_verify_files
+check_layout
+for offset in 0 524288 1048576; do
+	_nc_check_range "$file" "$offset" 131072 regular
+done
+
+echo "Silence is golden"
+_exit 0
