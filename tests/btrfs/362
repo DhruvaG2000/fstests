@@ -39,7 +39,7 @@ else
     conversion_failed=1
 fi
 # Delayed allocation errors can surface at fsync rather than ioctl.
-if ! LC_ALL=C timeout 180 "$XFS_IO_PROG" -c fsync "$file" \
+if ! LC_ALL=C timeout 180 $XFS_IO_PROG -c fsync "$file" \
 	> "$tmp.fsync" 2>&1; then
     fsync_failed=1
 fi
