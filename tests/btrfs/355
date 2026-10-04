@@ -1,0 +1,80 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# FS QA Test 355
+#
+# Verify bounded NOCOMPRESS conversion and EOF range handling.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+
+. ./common/filter
+. ./common/btrfs_nocomp
+
+_nc_require
+_scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib
+_nc_probe
+
+file="$SCRATCH_MNT/range"
+_nc_write "$file" 0 4194304 0x5a
+_nc_save_file "$file"
+_nc_check_range "$file" 0 4194304 compressed
+_nc_mapping "$file" 0 131072 > "$tmp.prefix"
+_nc_mapping "$file" 4063232 131072 > "$tmp.suffix"
+
+_nc_defrag -s 1M -l 512K "$file"
+_nc_check_range "$file" 1048576 524288 regular
+_nc_check_range "$file" 0 1048576 compressed
+_nc_check_range "$file" 1572864 2621440 compressed
+_nc_mapping "$file" 0 131072 > "$tmp.prefix-after"
+_nc_mapping "$file" 4063232 131072 > "$tmp.suffix-after"
+cmp -s "$tmp.prefix" "$tmp.prefix-after" || _fail "prefix mapping changed"
+cmp -s "$tmp.suffix" "$tmp.suffix-after" || _fail "suffix mapping changed"
+
+# The two-sector tail can be compressed, unlike a single-sector tail on a
+# 4K filesystem. First convert a one-byte range, then use an unaligned start
+# and end the request at EOF, one byte into the final 4K sector.
+tail="$SCRATCH_MNT/partial"
+_nc_write "$tail" 0 135169 0x39
+_nc_save_file "$tail"
+_nc_check_range "$tail" 131072 4097 compressed
+_nc_defrag -s 128K -l 1 "$tail"
+_nc_check_range "$tail" 131072 4096 regular
+_nc_defrag -s 131073 -l 4096 "$tail"
+_nc_check_range "$tail" 131072 4097 regular
+
+# Zero length means to EOF; a length extending past EOF must be clamped.
+for mode in zero huge; do
+	f="$SCRATCH_MNT/$mode"
+	_nc_write "$f" 0 262144 0x38
+	_nc_save_file "$f"
+	_nc_check_range "$f" 0 262144 compressed
+	case "$mode" in
+	zero) _nc_defrag -s 128K -l 0 "$f" ;;
+	huge) _nc_defrag -s 128K -l 16M "$f" ;;
+	esac
+	_nc_check_range "$f" 0 131072 compressed
+	_nc_check_range "$f" 131072 131072 regular
+done
+
+# A nonempty file rejects start == EOF, but an empty file is a no-op.
+_nc_raw_expect EINVAL "$file" 4194304 4096
+touch "$SCRATCH_MNT/empty" || _fail "create empty file failed"
+_nc_save_file "$SCRATCH_MNT/empty"
+_nc_raw_expect OK "$SCRATCH_MNT/empty" 0 0
+_nc_verify_files
+_scratch_cycle_mount compress=zlib
+_nc_verify_files
+_nc_check_range "$file" 1048576 524288 regular
+_nc_check_range "$file" 0 1048576 compressed
+_nc_check_range "$file" 1572864 2621440 compressed
+_nc_check_range "$tail" 131072 4097 regular
+for mode in zero huge; do
+	_nc_check_range "$SCRATCH_MNT/$mode" 0 131072 compressed
+	_nc_check_range "$SCRATCH_MNT/$mode" 131072 131072 regular
+done
+
+echo "Silence is golden"
+_exit 0
