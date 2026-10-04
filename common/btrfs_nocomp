@@ -62,7 +62,7 @@ _nc_defrag()
 _nc_map()
 {
 	local file=$1 offset=$2 length=$3
-	$XFS_IO_PROG -c "fiemap -v $offset $length" "$file" \
+	$XFS_IO_PROG -r -c "fiemap -v $offset $length" "$file" \
 		> "$tmp.nc-map" 2>> "$seqres.full" || _fail "fiemap failed: $file"
 	cat "$tmp.nc-map" >> "$seqres.full"
 }
