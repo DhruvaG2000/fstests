@@ -15,7 +15,7 @@ _begin_fstest auto quick defrag compress fiemap
 _nc_require
 _require_btrfs_inline_extents_creation
 _scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
-_scratch_mount -o compress=zlib,max_inline=4096 || _fail "mount failed"
+_scratch_mount -o compress=zlib,max_inline=4096
 _nc_probe
 
 file="$SCRATCH_MNT/inline"
@@ -25,12 +25,12 @@ _nc_check_range "$file" 0 2048 inline
 _nc_defrag "$file"
 _nc_check_range "$file" 0 2048 inline
 _nc_verify_files
-_scratch_cycle_mount compress=zlib,max_inline=4096 || _fail "remount failed"
+_scratch_cycle_mount compress=zlib,max_inline=4096
 _nc_check_range "$file" 0 2048 inline
 _nc_verify_files
 
 # Lowering max_inline makes the same extent eligible for conversion.
-_scratch_cycle_mount compress=zlib,max_inline=0 || _fail "remount failed"
+_scratch_cycle_mount compress=zlib,max_inline=0
 _nc_defrag "$file"
 _nc_check_range "$file" 0 2048 regular
 _nc_verify_files
@@ -48,7 +48,7 @@ for length in 1 4095 4097 131073; do
 	_nc_check_range "$f" 0 "$length" regular
 done
 _nc_verify_files
-_scratch_cycle_mount compress=zlib,max_inline=0 || _fail "remount failed"
+_scratch_cycle_mount compress=zlib,max_inline=0
 _nc_verify_files
 _nc_check_range "$file" 0 2048 regular
 for length in 1 4095 4097 131073; do

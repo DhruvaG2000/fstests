@@ -15,7 +15,7 @@ _begin_fstest auto quick defrag compress prealloc fiemap
 _nc_require
 _require_xfs_io_command falloc -k
 _scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
-_scratch_mount -o compress=zlib || _fail "mount failed"
+_scratch_mount -o compress=zlib
 _nc_probe
 
 file="$SCRATCH_MNT/islands"
@@ -60,7 +60,7 @@ done
 check_layout
 _nc_verify_files
 
-_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_scratch_cycle_mount compress=zlib
 _nc_verify_files
 check_layout
 for offset in 0 524288 1048576; do

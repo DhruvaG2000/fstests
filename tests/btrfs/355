@@ -14,7 +14,7 @@ _begin_fstest auto quick defrag compress fiemap
 
 _nc_require
 _scratch_mkfs -s 4k >> "$seqres.full" 2>&1 || _fail "mkfs failed"
-_scratch_mount -o compress=zlib || _fail "mount failed"
+_scratch_mount -o compress=zlib
 _nc_probe
 
 file="$SCRATCH_MNT/range"
@@ -65,7 +65,7 @@ touch "$SCRATCH_MNT/empty" || _fail "create empty file failed"
 _nc_save_file "$SCRATCH_MNT/empty"
 _nc_raw_expect OK "$SCRATCH_MNT/empty" 0 0
 _nc_verify_files
-_scratch_cycle_mount compress=zlib || _fail "remount failed"
+_scratch_cycle_mount compress=zlib
 _nc_verify_files
 _nc_check_range "$file" 1048576 524288 regular
 _nc_check_range "$file" 0 1048576 compressed
