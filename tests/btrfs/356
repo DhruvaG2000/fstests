@@ -1,0 +1,53 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# FS QA Test 356
+#
+# Test that defrag --nocomp uncompresses data extents but leaves holes and
+# preallocated extents, including one beyond EOF, untouched.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress prealloc fiemap
+
+. ./common/filter
+. ./common/punch # for _filter_fiemap_flags
+
+_require_btrfs_defrag_nocompress
+_require_btrfs_support_sectorsize 4096
+_require_btrfs_no_nodatacow
+_require_btrfs_no_nodatasum
+_require_btrfs_no_autodefrag
+_require_xfs_io_command "fiemap"
+_require_xfs_io_command "falloc" "-k"
+
+_wants_kernel_commit 009b2056cb25 \
+	"btrfs: defrag: add flag to force no-compression"
+
+_scratch_mkfs -s 4k >> $seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib
+
+# Compressed extents at 0, 512K and 1M, holes in between, a preallocated
+# extent at 256K and a preallocated extent beyond EOF at 1280K. Fsync before
+# fallocating, otherwise the data would be written as NOCOW, uncompressed.
+$XFS_IO_PROG -f -c "pwrite -S 0xab 0 128K" \
+	     -c "pwrite -S 0xcd 512K 128K" \
+	     -c "pwrite -S 0xef 1M 128K" \
+	     -c "fsync" \
+	     -c "falloc 256K 128K" \
+	     -c "falloc -k 1280K 128K" \
+	     $SCRATCH_MNT/foo | _filter_xfs_io
+
+echo "fiemap before defrag:"
+$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/foo | _filter_fiemap_flags 1
+
+$BTRFS_UTIL_PROG filesystem defragment --nocomp $SCRATCH_MNT/foo
+
+# Check the new layout and data are persisted.
+_scratch_cycle_mount compress=zlib
+
+echo "fiemap after defrag:"
+$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/foo | _filter_fiemap_flags 1
+md5sum $SCRATCH_MNT/foo | _filter_scratch
+
+_exit 0

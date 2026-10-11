@@ -1,0 +1,28 @@
+QA output created by 356
+wrote 131072/131072 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+wrote 131072/131072 bytes at offset 524288
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+wrote 131072/131072 bytes at offset 1048576
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+fiemap before defrag:
+0: [0..255]: encoded
+1: [256..511]: hole
+2: [512..767]: unwritten
+3: [768..1023]: hole
+4: [1024..1279]: encoded
+5: [1280..2047]: hole
+6: [2048..2303]: encoded
+7: [2304..2559]: hole
+8: [2560..2815]: unwritten
+fiemap after defrag:
+0: [0..255]: none
+1: [256..511]: hole
+2: [512..767]: unwritten
+3: [768..1023]: hole
+4: [1024..1279]: none
+5: [1280..2047]: hole
+6: [2048..2303]: none
+7: [2304..2559]: hole
+8: [2560..2815]: unwritten
+dc61af0129fdc173b1bc986ca00096bc  SCRATCH_MNT/foo
