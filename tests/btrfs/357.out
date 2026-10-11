@@ -1,0 +1,39 @@
+QA output created by 357
+wrote 2048/2048 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+fiemap before defrag:
+0: [0..7]: encoded|last
+fiemap after defrag with max_inline=4096:
+0: [0..7]: encoded|last
+wrote 1/1 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+tail-1 fiemap before defrag:
+0: [0..7]: last
+wrote 4095/4095 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+tail-4095 fiemap before defrag:
+0: [0..7]: last
+wrote 4097/4097 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+tail-4097 fiemap before defrag:
+0: [0..15]: encoded|last
+wrote 131073/131073 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+tail-131073 fiemap before defrag:
+0: [0..255]: encoded
+1: [256..263]: last
+foo fiemap after defrag:
+0: [0..7]: last
+tail-1 fiemap after defrag:
+0: [0..7]: last
+tail-4095 fiemap after defrag:
+0: [0..7]: last
+tail-4097 fiemap after defrag:
+0: [0..15]: last
+tail-131073 fiemap after defrag:
+0: [0..263]: last
+a97d075b76a2d5d777ebadd4e3f3be94  SCRATCH_MNT/foo
+e6cf2aa82fa371b686171ecd6a734e5d  SCRATCH_MNT/tail-1
+eb7177e6602dec278d9eb99dfcb32764  SCRATCH_MNT/tail-4095
+915c2ed4a6fdedfd3ef3bb4198d9b4f8  SCRATCH_MNT/tail-4097
+1e71d33e1f1368bb15cbe39b7b9f2447  SCRATCH_MNT/tail-131073

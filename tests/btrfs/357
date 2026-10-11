@@ -1,0 +1,63 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# FS QA Test 357
+#
+# Test that defrag --nocomp keeps a compressed inline extent while it can stay
+# inline, uncompresses it once max_inline no longer allows it, and handles
+# files with short EOF tails.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+
+. ./common/filter
+. ./common/punch # for _filter_fiemap_flags
+
+_require_btrfs_defrag_nocompress
+_require_btrfs_support_sectorsize 4096
+_require_btrfs_no_nodatacow
+_require_btrfs_no_nodatasum
+_require_btrfs_no_autodefrag
+_require_btrfs_inline_extents_creation
+_require_xfs_io_command "fiemap"
+
+_wants_kernel_commit 009b2056cb25 \
+	"btrfs: defrag: add flag to force no-compression"
+
+_scratch_mkfs -s 4k >> $seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib,max_inline=4096
+
+# A 2K file can only be compressed as an inline extent, so the fiemap encoded
+# flag here means a compressed inline extent.
+$XFS_IO_PROG -f -c "pwrite -S 0xab 0 2K" $SCRATCH_MNT/foo | _filter_xfs_io
+echo "fiemap before defrag:"
+$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/foo | _filter_fiemap_flags 1
+
+$BTRFS_UTIL_PROG filesystem defragment --nocomp $SCRATCH_MNT/foo
+_scratch_cycle_mount compress=zlib,max_inline=4096
+echo "fiemap after defrag with max_inline=4096:"
+$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/foo | _filter_fiemap_flags 1
+
+_scratch_cycle_mount compress=zlib,max_inline=0
+$BTRFS_UTIL_PROG filesystem defragment --nocomp $SCRATCH_MNT/foo
+
+for len in 1 4095 4097 131073; do
+	$XFS_IO_PROG -f -c "pwrite -S 0xcd 0 $len" $SCRATCH_MNT/tail-$len | \
+		_filter_xfs_io
+	echo "tail-$len fiemap before defrag:"
+	$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/tail-$len | \
+		_filter_fiemap_flags 1
+	$BTRFS_UTIL_PROG filesystem defragment --nocomp $SCRATCH_MNT/tail-$len
+done
+
+# Check the new layout and data are persisted.
+_scratch_cycle_mount compress=zlib,max_inline=0
+
+for f in foo tail-1 tail-4095 tail-4097 tail-131073; do
+	echo "$f fiemap after defrag:"
+	$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/$f | _filter_fiemap_flags 1
+done
+md5sum $SCRATCH_MNT/{foo,tail-1,tail-4095,tail-4097,tail-131073} | _filter_scratch
+
+_exit 0
