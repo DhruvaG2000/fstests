@@ -1,0 +1,45 @@
+QA output created by 355
+wrote 4194304/4194304 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+wrote 135169/135169 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+wrote 262144/262144 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+wrote 262144/262144 bytes at offset 0
+XXX Bytes, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+fiemap before defrag:
+range:
+0: [0..7935]: encoded
+1: [7936..8191]: encoded|last
+partial_sector:
+0: [0..255]: encoded
+1: [256..271]: encoded|last
+zero_length:
+0: [0..255]: encoded
+1: [256..511]: encoded|last
+past_eof:
+0: [0..255]: encoded
+1: [256..511]: encoded|last
+partial_sector after uncompressing one byte:
+0: [0..255]: encoded
+1: [256..263]: none
+2: [264..271]: encoded|last
+fiemap after defrag:
+range:
+0: [0..2047]: encoded
+1: [2048..3071]: none
+2: [3072..7935]: encoded
+3: [7936..8191]: encoded|last
+partial_sector:
+0: [0..255]: encoded
+1: [256..271]: last
+zero_length:
+0: [0..255]: encoded
+1: [256..511]: last
+past_eof:
+0: [0..255]: encoded
+1: [256..511]: last
+e9295e0e0a926a8922168f1fc481ef90  SCRATCH_MNT/range
+6190a9bc8f51d424927964094f0ce4d1  SCRATCH_MNT/partial_sector
+832cb356cb2524376d8faa4f76cfcfcd  SCRATCH_MNT/zero_length
+832cb356cb2524376d8faa4f76cfcfcd  SCRATCH_MNT/past_eof

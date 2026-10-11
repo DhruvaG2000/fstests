@@ -1,0 +1,76 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Meta Platforms, Inc. and affiliates. All Rights Reserved.
+#
+# FS QA Test 355
+#
+# Test that defrag --nocomp only uncompresses the requested range, including
+# a partial final sector, a zero length and a length extending past EOF.
+#
+. ./common/preamble
+_begin_fstest auto quick defrag compress fiemap
+
+. ./common/filter
+. ./common/punch # for _filter_fiemap_flags
+
+_require_btrfs_defrag_nocompress
+_require_btrfs_support_sectorsize 4096
+_require_btrfs_no_nodatacow
+_require_btrfs_no_nodatasum
+_require_btrfs_no_autodefrag
+_require_xfs_io_command "fiemap"
+
+_wants_kernel_commit 009b2056cb25 \
+	"btrfs: defrag: add flag to force no-compression"
+
+_scratch_mkfs -s 4k >> $seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount -o compress=zlib
+
+# 4M is chosen as a convenient size, uncompress [1M, 1.5M) later
+$XFS_IO_PROG -f -c "pwrite -S 0xab 0 4M" $SCRATCH_MNT/range | _filter_xfs_io
+
+# A file with a compressed extent covering a partial final sector at
+# [128K, 132K + 1). Uncompress one byte of it, then the rest up to EOF.
+$XFS_IO_PROG -f -c "pwrite -S 0xcd 0 $((132 * 1024 + 1))" $SCRATCH_MNT/partial_sector | \
+	_filter_xfs_io
+
+# Zero length means up to EOF, a length past EOF is clamped to EOF.
+# The name zero_length refers to the later -l 0 argument.
+$XFS_IO_PROG -f -c "pwrite -S 0xef 0 256K" $SCRATCH_MNT/zero_length | _filter_xfs_io
+# An independent file here lets -l 16M be tested without the earlier -l 0 conversion
+# affecting it
+$XFS_IO_PROG -f -c "pwrite -S 0xef 0 256K" $SCRATCH_MNT/past_eof | _filter_xfs_io
+
+# As in btrfs/280, defrag first to avoid writeback timing leaving compressed
+# extents smaller than 128K and changing the last extent's logical start.
+for f in range partial_sector zero_length past_eof; do
+	$BTRFS_UTIL_PROG filesystem defragment -czlib -f $SCRATCH_MNT/$f \
+		>> $seqres.full 2>&1
+done
+
+echo "fiemap before defrag:"
+for f in range partial_sector zero_length past_eof; do
+	echo "$f:"
+	$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/$f | _filter_fiemap_flags 1
+done
+
+$BTRFS_UTIL_PROG filesystem defragment --nocomp -s 1M -l 512K $SCRATCH_MNT/range
+$BTRFS_UTIL_PROG filesystem defragment --nocomp -s 128K -l 1 $SCRATCH_MNT/partial_sector
+echo "partial_sector after uncompressing one byte:"
+$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/partial_sector | _filter_fiemap_flags 1
+$BTRFS_UTIL_PROG filesystem defragment --nocomp -s $((128 * 1024 + 1)) -l 4K \
+	$SCRATCH_MNT/partial_sector
+$BTRFS_UTIL_PROG filesystem defragment --nocomp -s 128K -l 0 $SCRATCH_MNT/zero_length
+$BTRFS_UTIL_PROG filesystem defragment --nocomp -s 128K -l 16M $SCRATCH_MNT/past_eof
+
+# Check the new layout and data are persisted.
+_scratch_cycle_mount compress=zlib
+
+echo "fiemap after defrag:"
+for f in range partial_sector zero_length past_eof; do
+	echo "$f:"
+	$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/$f | _filter_fiemap_flags 1
+done
+md5sum $SCRATCH_MNT/{range,partial_sector,zero_length,past_eof} | _filter_scratch
+
+_exit 0

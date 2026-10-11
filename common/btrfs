@@ -1080,3 +1080,17 @@ _require_btrfs_iouring_encoded_read()
 		_notrun "btrfs io_uring encoded read failed with -EOPNOTSUPP"
 	fi
 }
+
+# Check that both btrfs-progs and the kernel support defrag --nocomp.
+_require_btrfs_defrag_nocompress()
+{
+	_require_scratch
+	_require_btrfs_command filesystem defragment --nocomp
+
+	_scratch_mkfs > /dev/null 2>&1
+	_scratch_mount
+	touch $SCRATCH_MNT/foo
+	$BTRFS_UTIL_PROG filesystem defragment --nocomp $SCRATCH_MNT/foo \
+		> /dev/null 2>&1 || _notrun "kernel does not support defrag --nocomp"
+	_scratch_unmount
+}
