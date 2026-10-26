@@ -1,0 +1,86 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Meta Platforms, Inc.  All Rights Reserved.
+#
+# FS QA Test 355
+#
+# Verify that reading a file after its block group was relocated into badly
+# fragmented free space on a filesystem with the remap-tree feature returns the
+# data that was written.
+#
+# Relocating a block group with the remap-tree feature does not move extents
+# physically contiguously, it records one remap item per destination range. If
+# the destination free space is fragmented, a single extent ends up split in
+# many remap items, and a read bio that spans more than one of them must be
+# split at every remap item boundary. A bug in the logical to physical mapping
+# can cause the tail of such bio to be read contiguously from the destination
+# of the first remap item, so the read returns data that belongs to some other
+# file: csum errors for files with checksums and silent corruption for NOCOW
+# files, which is what we test here.
+#
+. ./common/preamble
+_begin_fstest auto balance
+
+. ./common/filter
+
+_fixed_by_kernel_commit xxxxxxxxxxxx \
+	"btrfs: do not extend a remapped range in btrfs_map_block()"
+
+_require_scratch
+_require_btrfs_mkfs_feature remap-tree
+_require_btrfs_fs_feature remap_tree
+_require_chattr C
+_require_command "$FILEFRAG_PROG" filefrag
+
+fs_size=$((512 * 1024 * 1024))
+nocow_file_size_mb=32
+filler_extent_size=$((64 * 1024))
+
+_scratch_mkfs -b $fs_size -O remap-tree >>$seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount
+
+# Create the NOCOW file first, so that it is allocated contiguously at the
+# start of the first data block group. Use random data so that any bio mapped to
+# the wrong place returns different content.
+nocow_file=$SCRATCH_MNT/nocow_file
+touch $nocow_file
+$CHATTR_PROG +C $nocow_file
+dd if=/dev/urandom of=$nocow_file bs=1M count=$nocow_file_size_mb \
+	status=none
+_scratch_cycle_mount
+checksum_before_relocation=$(_md5_checksum $nocow_file)
+
+# Fill the rest of the filesystem with one file made of small extents, using
+# direct IO so that each write gets its own extent, and then free every other
+# extent, so all the free space left is made of small ranges spread over the
+# other block groups.
+filler_file=$SCRATCH_MNT/filler_file
+$XFS_IO_PROG -f -d -c "pwrite -b $filler_extent_size 0 $fs_size" \
+	$filler_file >>$seqres.full 2>&1
+filler_file_size=$(_get_filesize $filler_file)
+$AWK_PROG -v extent_size=$filler_extent_size -v file_size=$filler_file_size '
+	BEGIN {
+		for (offset = 0; offset < file_size; offset += 2 * extent_size)
+			print "fpunch", offset, extent_size
+	}' | $XFS_IO_PROG $filler_file >>$seqres.full 2>&1
+sync
+
+# Relocate the block group where the NOCOW file lives, which splits its extents
+# across the small free ranges.
+nocow_file_logical=$(_btrfs_get_first_logical $nocow_file)
+_run_btrfs_balance_start \
+	-dvrange=$nocow_file_logical..$((nocow_file_logical + 1)) \
+	$SCRATCH_MNT >>$seqres.full 2>&1 || _fail "balance failed"
+
+# Drop the page cache so the file is read from the device through the remapped
+# ranges.
+_scratch_cycle_mount
+checksum_after_relocation=$(_md5_checksum $nocow_file)
+
+if [ "$checksum_before_relocation" != "$checksum_after_relocation" ]; then
+	echo "NOCOW file content changed after relocation:" \
+		"$checksum_before_relocation != $checksum_after_relocation"
+fi
+
+echo "Silence is golden"
+_exit 0
