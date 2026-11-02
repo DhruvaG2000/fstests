@@ -1,0 +1,68 @@
+From 5fb544898fdc9d212647b560b311c48c16f2971d Mon Sep 17 00:00:00 2001
+From: Dhruva Gole <goledhruva@gmail.com>
+Date: Mon, 26 Oct 2026 05:09:31 -0700
+Subject: [PATCH] btrfs: do not extend a remapped range in btrfs_map_block()
+
+For a logical address in a remapped block group, btrfs_map_block() calls
+btrfs_translate_remap() to find the address the data was moved to. That
+function sets *length to the size that is contiguous in the destination,
+which is at most the end of the remap item that was found.
+
+btrfs_map_block() then overwrites *length with the minimum between what is
+left in the destination chunk and the maximum I/O length for it, which
+discards the limit set by btrfs_translate_remap(). The caller, such as
+btrfs_submit_chunk(), assumes the whole length is mapped contiguously from
+the returned address and only splits the bio at that length, so if the
+bio spans more than one remap item, its tail is read from the destination
+of the first item instead of from the destination of the item it belongs
+to.
+
+This happens after relocating a block group with the remap-tree feature
+into fragmented free space, where a single extent ends up split in many
+remap items. Reading such a file results in:
+
+ - for files with checksums, csum errors that bump the corruption device
+   stats and failed O_DIRECT reads;
+
+ - for NOCOW files or files without checksums, silently returning data
+   from unrelated locations on the device, which can be the content of
+   other files or stale data.
+
+Fix this by saving the length returned by btrfs_translate_remap() and
+using it as an additional upper bound for *length.
+
+Fixes: 18ba64992871 ("btrfs: redirect I/O for remapped block groups")
+Signed-off-by: Dhruva Gole <goledhruva@gmail.com>
+---
+ fs/btrfs/volumes.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/fs/btrfs/volumes.c b/fs/btrfs/volumes.c
+index 5cd1ba543064..d96bf3e28b50 100644
+--- a/fs/btrfs/volumes.c
++++ b/fs/btrfs/volumes.c
+@@ -7072,6 +7072,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
+ 	bool dev_replace_is_ongoing = false;
+ 	u16 num_alloc_stripes;
+ 	u64 max_len;
++	u64 remap_len = U64_MAX;
+ 
+ 	ASSERT(bioc_ret);
+ 
+@@ -7090,6 +7091,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
+ 		ret = btrfs_translate_remap(fs_info, &new_logical, length);
+ 		if (ret)
+ 			goto out;
++		remap_len = *length;
+ 
+ 		if (new_logical != logical) {
+ 			btrfs_free_chunk_map(map);
+@@ -7111,7 +7113,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
+ 	map_offset = logical - map->start;
+ 	io_geom.raid56_full_stripe_start = (u64)-1;
+ 	max_len = btrfs_max_io_len(map, map_offset, &io_geom);
+-	*length = min_t(u64, map->chunk_len - map_offset, max_len);
++	*length = min3(map->chunk_len - map_offset, max_len, remap_len);
+ 	io_geom.use_rst = btrfs_need_stripe_tree_update(fs_info, map->type);
+ 
+ 	if (dev_replace->replace_task != current)
